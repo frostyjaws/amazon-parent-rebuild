@@ -6,37 +6,16 @@ import re
 import pandas as pd
 import requests
 
-# Robust imports: try helpers.* first (your original layout), fall back to local files
+# --- Robust imports: prefer helpers/*, else local files ---
 try:
-    from helpers.auth import get_amazon_access_token
-    from helpers.util import (
-        extract_keywords_from_title,
-        injected_bullets,
-        injected_description,
-        parse_variation,
-        sku_from_variation,
-        compact_json,
-        validate_messages_patch,
-        build_patch_message,
-        required_core_attrs_for_child,
-        required_core_attrs_for_parent,
-        PRICE_MAP,
-    )
+    import helpers.auth as A
+    import helpers.util as U
 except ModuleNotFoundError:
-    from auth import get_amazon_access_token
-    from util import (
-        extract_keywords_from_title,
-        injected_bullets,
-        injected_description,
-        parse_variation,
-        sku_from_variation,
-        compact_json,
-        validate_messages_patch,
-        build_patch_message,
-        required_core_attrs_for_child,
-        required_core_attrs_for_parent,
-        PRICE_MAP,
-    )
+    import auth as A
+    import util as U
+
+# Back-compat alias: some older code referenced injected_desc_
+injected_desc_ = U.injected_description
 
 st.set_page_config(page_title="Amazon Parent Rebuilder — PATCH", layout="wide")
 st.title("🧩 Amazon Parent Rebuilder — Unified Bulk (PATCH)")
@@ -108,15 +87,21 @@ def submit_json_feed(messages, label, token):
         "messages": messages,
     }
 
+    # Create feed document
     doc = requests.post(
         f"{AMZ_ENDPOINT}/feeds/2021-06-30/documents",
         headers={"x-amz-access-token": token, "Content-Type": "application/json"},
         json={"contentType": "application/json"}
     ).json()
 
-    requests.put(doc["url"], data=json.dumps(payload).encode("utf-8"),
-                 headers={"Content-Type": "application/json"}).raise_for_status()
+    # Upload payload
+    requests.put(
+        doc["url"],
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    ).raise_for_status()
 
+    # Create feed
     res = requests.post(
         f"{AMZ_ENDPOINT}/feeds/2021-06-30/feeds",
         headers={"x-amz-access-token": token, "Content-Type": "application/json"},
@@ -134,8 +119,10 @@ def poll_feed_until_terminal(feed_id, label, token):
     start = time.time()
     while True:
         time.sleep(CHECK_INTERVAL)
-        r = requests.get(f"{AMZ_ENDPOINT}/feeds/2021-06-30/feeds/{feed_id}",
-                         headers={"x-amz-access-token": token})
+        r = requests.get(
+            f"{AMZ_ENDPOINT}/feeds/2021-06-30/feeds/{feed_id}",
+            headers={"x-amz-access-token": token}
+        )
         r.raise_for_status()
         data = r.json()
         status = data.get("processingStatus")
@@ -149,12 +136,17 @@ def poll_feed_until_terminal(feed_id, label, token):
 
 def download_processing_report_if_ready(feed_json, token):
     doc_id = feed_json.get("resultFeedDocumentId")
-    if not doc_id: return None
-    info = requests.get(f"{AMZ_ENDPOINT}/feeds/2021-06-30/documents/{doc_id}",
-                        headers={"x-amz-access-token": token}).json()
+    if not doc_id:
+        return None
+    info = requests.get(
+        f"{AMZ_ENDPOINT}/feeds/2021-06-30/documents/{doc_id}",
+        headers={"x-amz-access-token": token}
+    ).json()
     url = info.get("url")
-    if not url: return None
-    rep = requests.get(url); rep.raise_for_status()
+    if not url:
+        return None
+    rep = requests.get(url)
+    rep.raise_for_status()
     return rep.text
 
 # ---------------- Action ----------------
@@ -162,9 +154,10 @@ if st.button("🚀 Run Full Rebuild (PATCH)"):
     parents = [p.strip() for p in parents_text.splitlines() if p.strip()]
     old_children = [c.strip() for c in old_children_text.splitlines() if c.strip()]
     if not parents:
-        st.error("Enter at least one parent SKU."); st.stop()
+        st.error("Enter at least one parent SKU.")
+        st.stop()
 
-    token = get_amazon_access_token()
+    token = A.get_amazon_access_token()
 
     delete_msgs = []
     create_msgs = []
@@ -175,5 +168,121 @@ if st.button("🚀 Run Full Rebuild (PATCH)"):
         base = re.sub(r"-PARENT$", "", parent_sku.strip(), flags=re.I)
         title_val = f"{base.replace('-', ' ').strip()} - Baby Bodysuit"
 
-        kws = extract_keywords_from_title(title_val) if inject_from_title else []
-        desc = injected_desc_
+        # Use the correct function; alias exists for safety
+        kws = U.extract_keywords_from_title(title_val) if inject_from_title else []
+        desc = U.injected_description(DESCRIPTION, kws)
+        bullets = U.injected_bullets(kws, BULLETS)
+
+        # parent patch (optional)
+        if include_parent_update:
+            parent_attrs = U.required_core_attrs_for_parent(
+                title_val=title_val,
+                brand=brand_name,
+                item_type_keyword=item_type_keyword,
+                desc_html=desc,
+                bullets=bullets,
+                variation_theme_display=variation_theme_display,
+            )
+            parent_msgs.append(
+                U.build_patch_message(message_id=0, sku=parent_sku, product_type="LEOTARD", attributes=parent_attrs)
+            )
+
+        # build children
+        for v in VARIATIONS:
+            size, color, sleeve = U.parse_variation(v)
+            child_sku = U.sku_from_variation(base, size, color, sleeve)
+
+            # DELETE old (only if user didn't provide an explicit list)
+            if not old_children:
+                delete_msgs.append({
+                    "messageId": 0,
+                    "sku": child_sku,
+                    "operationType": "DELETE",
+                    "productType": "LEOTARD"
+                })
+
+            # Child attributes with REQUIRED fields + per-variant price
+            lp = U.PRICE_MAP.get(v, 29.99)
+            child_attrs = U.required_core_attrs_for_child(
+                title_val=f"{title_val} - {size} {color} {sleeve}".strip(),
+                size=size, color=color, sleeve=sleeve,
+                brand=brand_name, item_type_keyword=item_type_keyword,
+                desc_html=desc, bullets=bullets,
+                list_price=lp
+            )
+            # attach parent link + variation theme (already set, but include relationship)
+            child_attrs["child_parent_sku_relationship"] = [{
+                "child_relationship_type": "variation",
+                "parent_sku": parent_sku
+            }]
+
+            create_msgs.append(
+                U.build_patch_message(message_id=0, sku=child_sku, product_type="LEOTARD", attributes=child_attrs)
+            )
+            inventory_rows.append(child_sku)
+
+    # explicit deletions override automatic
+    if old_children:
+        delete_msgs = [{
+            "messageId": 0, "sku": s, "operationType": "DELETE", "productType": "LEOTARD"
+        } for s in old_children]
+
+    # ---------- VALIDATE ----------
+    problems = []
+    problems += U.validate_messages_patch(create_msgs, "CREATE")
+    if include_parent_update:
+        problems += U.validate_messages_patch(parent_msgs, "PARENT")
+    # DELETEs aren't PATCH, skip validator
+
+    if problems:
+        st.error("❌ Validation failed — nothing submitted.")
+        with st.expander("See errors"):
+            for p in problems:
+                st.write(p)
+        with st.expander("Sample CREATE (first 3)"):
+            st.code(U.compact_json(create_msgs[:3]), language="json")
+        st.stop()
+
+    # ---------- SUBMIT ----------
+    results = []
+
+    st.markdown("### 🗑️ Submitting DELETE feed…")
+    del_id = submit_json_feed(delete_msgs, "DELETE", token)
+    del_status, del_json = poll_feed_until_terminal(del_id, "DELETE", token)
+    results.append(["DELETE", del_id, del_status, len(delete_msgs)])
+
+    st.markdown("### 🧱 Submitting CREATE (PATCH) feed…")
+    create_id = submit_json_feed(create_msgs, "CREATE", token)
+    create_status, create_json = poll_feed_until_terminal(create_id, "CREATE", token)
+    results.append(["CREATE", create_id, create_status, len(create_msgs)])
+
+    if include_parent_update:
+        st.markdown("### 🏷️ Submitting PARENT (PATCH) feed…")
+        parent_id = submit_json_feed(parent_msgs, "PARENT", token)
+        parent_status, parent_json = poll_feed_until_terminal(parent_id, "PARENT", token)
+        results.append(["PARENT", parent_id, parent_status, len(parent_msgs)])
+    else:
+        results.append(["PARENT", "-", "SKIPPED", 0])
+
+    if include_inventory_sync:
+        from inventory_feed_submitter import submit_inventory_feed
+        st.markdown("### 🧾 Submitting INVENTORY feed…")
+        inv_id = submit_inventory_feed(
+            inventory_rows, token, st.secrets["MARKETPLACE_ID"], st.secrets["SELLER_ID"], quantity=default_qty
+        )
+        inv_status, inv_json = poll_feed_until_terminal(inv_id, "INVENTORY", token)
+        results.append(["INVENTORY", inv_id, inv_status, len(inventory_rows)])
+    else:
+        results.append(["INVENTORY", "-", "SKIPPED", 0])
+
+    st.success("🎉 Bulk rebuild complete!")
+    st.dataframe(pd.DataFrame(results, columns=["Feed", "Feed ID", "Status", "Count"]), use_container_width=True)
+
+    st.markdown("#### 🔍 Diagnostics")
+    with st.expander("First 3 CREATE messages (compact)"):
+        st.code(U.compact_json(create_msgs[:3]), language="json")
+    if include_parent_update:
+        with st.expander("First 2 PARENT messages (compact)"):
+            st.code(U.compact_json(parent_msgs[:2]), language="json")
+    with st.expander("First 5 DELETE messages (compact)"):
+        st.code(U.compact_json(delete_msgs[:5]), language="json")
