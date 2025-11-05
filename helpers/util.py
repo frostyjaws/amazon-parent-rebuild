@@ -70,10 +70,6 @@ def compact_json(obj):
 def parse_variation(variation_str: str):
     """
     Converts '0-3M White Short Sleeve' -> ('0-3M', 'White', 'Short Sleeve').
-    Accepts formats like:
-      'Newborn White Short Sleeve'
-      '6M Natural Short Sleeve'
-      '0-3M Blue Long Sleeve'
     """
     parts = variation_str.strip().split()
     if len(parts) >= 4:
@@ -93,7 +89,6 @@ def parse_variation(variation_str: str):
         size = parts[0] if parts else ""
         color = parts[1] if len(parts) > 1 else ""
         sleeve = " ".join(parts[2:]) if len(parts) > 2 else ""
-    # Normalize capitalization
     size = size.strip()
     color = color.capitalize().strip()
     sleeve = sleeve.title().strip()
@@ -120,8 +115,7 @@ def sku_from_variation(base_name: str, size: str, color: str, sleeve: str) -> st
     """
     Build a stable child SKU:
       base_name-<SIZECODE>-<COLORCODE>-<SLEEVE>
-    Example:
-      base=GYROBABY, 0-3M/White/Short Sleeve -> GYROBABY-03M-WH-SS
+    Example: base=GYROBABY, 0-3M/White/Short Sleeve -> GYROBABY-03M-WH-SS
     """
     base = base_name.strip()
     sc = _size_code(size)
@@ -129,3 +123,25 @@ def sku_from_variation(base_name: str, size: str, color: str, sleeve: str) -> st
     sl = _sleeve_code(sleeve)
     return f"{base}-{sc}-{cc}-{sl}"
 
+# -----------------------------
+# Pre-flight validation (NEW)
+# -----------------------------
+def validate_messages(messages, must_have_attributes: bool, label: str):
+    """
+    Returns a list of human-readable problems (empty if ok).
+    - Ensures required top-level keys present.
+    - For UPDATE messages, ensures 'attributes' exists when must_have_attributes=True.
+    """
+    problems = []
+    for idx, m in enumerate(messages, start=1):
+        prefix = f"[{label} msg #{idx}]"
+        for k in ("sku", "operationType", "productType"):
+            if k not in m:
+                problems.append(f"{prefix} missing key '{k}'")
+        if m.get("operationType") == "UPDATE" and must_have_attributes:
+            if "attributes" not in m or not isinstance(m["attributes"], dict) or not m["attributes"]:
+                problems.append(f"{prefix} UPDATE requires non-empty 'attributes'.")
+        # Basic productType check
+        if m.get("productType") != "LEOTARD":
+            problems.append(f"{prefix} productType must be 'LEOTARD' (found '{m.get('productType')}').")
+    return problems
