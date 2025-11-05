@@ -43,7 +43,7 @@ def submit_inventory_feed(skus, access_token, marketplace_id, seller_id, quantit
     # 3) Submit feed
     feed_res = requests.post(
         f"{AMZ_ENDPOINT}/feeds/2021-06-30/feeds",
-        headers={"x-amz-access_token": access_token, "Content-Type": "application/json"},
+        headers={"x-amz-access-token": access_token, "Content-Type": "application/json"},
         json={
             "feedType": "POST_INVENTORY_AVAILABILITY_DATA",
             "marketplaceIds": [marketplace_id],
