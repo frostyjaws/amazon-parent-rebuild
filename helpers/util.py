@@ -1,66 +1,98 @@
-import json, re
-
-STOP_WORDS = {"NOFO", "VIBES", "BODYSUIT", "ONESIE"}
+# util.py
+import re, json
+from typing import List, Dict, Tuple
 
 # -----------------------------
-# Keyword extraction & injections
+# Tiny helpers you use elsewhere
 # -----------------------------
-def extract_keywords_from_title(title: str):
-    pre = title.split(" - ", 1)[0] if " - " in title else title
-    words = [w for w in re.findall(r"[A-Za-z0-9']+", pre) if w]
-    seen, out = set(), []
+def compact_json(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+def extract_keywords_from_title(title: str) -> List[str]:
+    """
+    From your rules: take words before the first ' - ' dash, strip punctuation,
+    drop NOFO/VIBES/BODYSUIT, de-dupe preserving order.
+    """
+    parts = title.split(" - ", 1)
+    head = parts[0] if parts else title
+    words = re.split(r"\s+", re.sub(r"[^\w\s]", " ", head))
+    cleaned = []
+    seen = set()
     for w in words:
-        if w.upper() in STOP_WORDS: 
+        if not w:
             continue
-        lw = w.lower()
-        if lw not in seen:
-            seen.add(lw); out.append(w)
-    return out
+        up = w.upper()
+        if up in {"NOFO", "VIBES", "BODYSUIT"}:
+            continue
+        if up not in seen:
+            cleaned.append(w)
+            seen.add(up)
+    return cleaned
 
-def injected_bullets(kws, base_bullets):
-    tpls = [
-        "🎨 Premium DTG print: '{kw}'",
-        "🎖️ Veteran-Owned small biz — '{kw}'",
-        "👶 100% cotton comfort — '{kw}'",
-        "🎁 Great baby shower gift: '{kw}'",
-        "📏 Many sizes & colors available."
-    ]
+def injected_bullets(keywords: List[str], base_bullets: List[str]) -> List[str]:
+    """
+    One-time use rule: first 4-5 keywords replace first N bullets; if fewer,
+    keep remaining base bullets.
+    """
+    bullets = base_bullets[:] if base_bullets else []
+    if not bullets:
+        return [*keywords[:5]]
     out = []
-    for i in range(5):
-        if i < len(kws):
-            out.append(tpls[i].format(kw=kws[i]))
-        elif i < len(base_bullets):
-            out.append(base_bullets[i])
+    kw_i = 0
+    for i, b in enumerate(bullets):
+        if kw_i < len(keywords) and i < 5:
+            out.append(f"{b} ({keywords[kw_i]})")
+            kw_i += 1
         else:
-            out.append("")
+            out.append(b)
     return out
 
-def injected_description(base_html, kws):
-    if not kws:
-        return base_html
-    return base_html.rstrip() + " " + f"<p>Design theme: {', '.join(kws[:3])}.</p>"
+def injected_description(desc_html: str, keywords: List[str]) -> str:
+    if not keywords:
+        return desc_html
+    try:
+        # append a tiny keyword sentence
+        return desc_html.rstrip() + f' <p>Keywords: {" · ".join(keywords[:8])}</p>'
+    except Exception:
+        return desc_html
 
-def compact_json(obj):
-    return json.dumps(obj, indent=2)
-
-# -----------------------------
-# Variation parsing & SKU codes
-# -----------------------------
-def parse_variation(variation_str: str):
-    parts = variation_str.strip().split()
-    if len(parts) >= 3:
-        size, color, sleeve = parts[0], parts[1], " ".join(parts[2:])
-    elif len(parts) == 2:
-        size, color, sleeve = parts[0], parts[1], ""
-    else:
-        size, color, sleeve = parts[0] if parts else "", "", ""
-    return size, color.capitalize(), sleeve.title()
+def parse_variation(v: str) -> Tuple[str, str, str]:
+    """
+    Accepts lines like '0-3M White Short Sleeve' or '12M Natural Short Sleeve'
+    Returns (size, color, sleeve)
+    """
+    tokens = v.split()
+    # Try to detect sleeve (Long/Short)
+    sleeve = "Long Sleeve" if "Long" in v else "Short Sleeve"
+    # color assumed to be last token before sleeve's first word
+    sleeve_first = "Long" if "Long" in v else "Short"
+    try:
+        idx = tokens.index(sleeve_first)
+    except ValueError:
+        idx = len(tokens) - 2  # safe-ish fallback
+    color = tokens[idx - 1] if idx - 1 >= 0 else "White"
+    size = " ".join(tokens[: idx - 1]) if idx - 1 > 0 else tokens[0]
+    return size.strip(), color.strip(), sleeve
 
 def _size_code(s):
-    return {"Newborn":"NB","0-3M":"03M","3-6M":"36M","6-9M":"69M","6M":"06M","12M":"12M","18M":"18M","24M":"24M"}.get(s, re.sub(r"[^A-Za-z0-9]","",s).upper()[:4] or "SZ")
+    return {
+        "Newborn": "NB",
+        "0-3M": "03M",
+        "3-6M": "36M",
+        "6-9M": "69M",
+        "6M": "06M",
+        "12M": "12M",
+        "18M": "18M",
+        "24M": "24M",
+    }.get(s, re.sub(r"[^A-Za-z0-9]", "", s).upper()[:4] or "SZ")
 
 def _color_code(c):
-    return {"White":"WH","Natural":"NA","Pink":"PK","Blue":"BL"}.get(c.capitalize(), re.sub(r"[^A-Za-z0-9]","",c).upper()[:2] or "XX")
+    return {
+        "White": "WH",
+        "Natural": "NA",
+        "Pink": "PK",
+        "Blue": "BL",
+    }.get(c.capitalize(), re.sub(r"[^A-Za-z0-9]", "", c).upper()[:2] or "XX")
 
 def _sleeve_code(s):
     return "LS" if "Long" in s else "SS"
@@ -98,15 +130,16 @@ PRICE_MAP = {
     "18M Natural Short Sleeve": 33.99,
     "24M White Short Sleeve": 29.99,
     "24M White Long Sleeve": 30.99,
-    "24M Natural Short Sleeve": 33.99
+    "24M Natural Short Sleeve": 33.99,
 }
 
 # -----------------------------
 # PATCH message helpers (2025 schema)
 # -----------------------------
-def build_patch_message(*, message_id:int, sku:str, product_type:str, attributes:dict):
+def build_patch_message(*, message_id: int, sku: str, product_type: str, attributes: dict):
     """
-    Build a JSON_LISTINGS_FEED 'PATCH' message with attributes nested under patches[].value.attributes
+    Build a JSON_LISTINGS_FEED 'PATCH' message with attributes nested under
+    patches[].value[0].attributes  (Amazon requires value to be an ARRAY).
     """
     return {
         "messageId": message_id,
@@ -116,24 +149,24 @@ def build_patch_message(*, message_id:int, sku:str, product_type:str, attributes
         "patches": [{
             "op": "replace",
             "path": "/",
-            "value": {
+            "value": [{
                 "attributes": attributes
-            }
+            }]
         }]
     }
 
-def required_core_attrs_for_child(*, title_val:str, size:str, color:str, sleeve:str,
-                                  brand:str, item_type_keyword:str, desc_html:str, bullets:list,
-                                  country_of_origin:str="US", import_designation:str="Made in USA",
-                                  department:str="Baby Girls", target_gender:str="female",
-                                  age_range:str="Infant", fabric_type:str="100% cotton",
-                                  care_instructions:str="Machine Wash",
-                                  batteries_required:bool=False,
-                                  dg_regulation:str="not_applicable",
-                                  pkg_len:float=3, pkg_wid:float=3, pkg_hgt:float=1, pkg_unit:str="inches",
-                                  pkg_weight:float=0.19, pkg_weight_unit:str="kilograms",
-                                  model_name:str="Crew Neck Bodysuit",
-                                  list_price:float=29.99):
+def required_core_attrs_for_child(*, title_val: str, size: str, color: str, sleeve: str,
+                                  brand: str, item_type_keyword: str, desc_html: str, bullets: list,
+                                  country_of_origin: str = "US", import_designation: str = "Made in USA",
+                                  department: str = "Baby Girls", target_gender: str = "female",
+                                  age_range: str = "Infant", fabric_type: str = "100% cotton",
+                                  care_instructions: str = "Machine Wash",
+                                  batteries_required: bool = False,
+                                  dg_regulation: str = "not_applicable",
+                                  pkg_len: float = 3, pkg_wid: float = 3, pkg_hgt: float = 1, pkg_unit: str = "inches",
+                                  pkg_weight: float = 0.19, pkg_weight_unit: str = "kilograms",
+                                  model_name: str = "Crew Neck Bodysuit",
+                                  list_price: float = 29.99) -> Dict:
     """
     Returns a dict of all attributes the processing report said were required.
     (We intentionally omit generic_keywords because Amazon drops it for this PT.)
@@ -156,7 +189,7 @@ def required_core_attrs_for_child(*, title_val:str, size:str, color:str, sleeve:
         "supplier_declared_dg_hz_regulation": [{"value": dg_regulation}],
         "item_package_dimensions": [{
             "length": {"value": pkg_len, "unit": pkg_unit},
-            "width":  {"value": pkg_wid, "unit": pkg_unit},
+            "width": {"value": pkg_wid, "unit": pkg_unit},
             "height": {"value": pkg_hgt, "unit": pkg_unit},
         }],
         "item_package_weight": [{"value": pkg_weight, "unit": pkg_weight_unit}],
@@ -169,9 +202,9 @@ def required_core_attrs_for_child(*, title_val:str, size:str, color:str, sleeve:
         "style": [{"value": sleeve}] if sleeve else [],
     }
 
-def required_core_attrs_for_parent(*, title_val:str, brand:str, item_type_keyword:str,
-                                   desc_html:str, bullets:list,
-                                   variation_theme_display:str="SIZE/COLOR"):
+def required_core_attrs_for_parent(*, title_val: str, brand: str, item_type_keyword: str,
+                                   desc_html: str, bullets: list,
+                                   variation_theme_display: str = "SIZE/COLOR") -> Dict:
     """
     Minimal but complete parent-level attributes (no price for parent).
     """
@@ -199,11 +232,11 @@ def required_core_attrs_for_parent(*, title_val:str, brand:str, item_type_keywor
 # -----------------------------
 # Validator for PATCH messages
 # -----------------------------
-def validate_messages_patch(messages, label):
-    problems=[]
+def validate_messages_patch(messages: List[Dict], label: str) -> List[str]:
+    problems = []
     for i, m in enumerate(messages, 1):
-        pre=f"[{label} #{i}]"
-        for k in ("messageId","sku","operationType","productType","patches"):
+        pre = f"[{label} #{i}]"
+        for k in ("messageId", "sku", "operationType", "productType", "patches"):
             if k not in m:
                 problems.append(f"{pre} missing key '{k}'")
         if m.get("operationType") != "PATCH":
@@ -215,12 +248,20 @@ def validate_messages_patch(messages, label):
         p0 = patches[0]
         if p0.get("op") != "replace" or p0.get("path") != "/":
             problems.append(f"{pre} patch must have op='replace' and path='/'")
-        val = p0.get("value", {})
-        attrs = val.get("attributes")
+
+        # NEW: value must be a non-empty ARRAY; first element must contain attributes dict
+        val = p0.get("value")
+        if not isinstance(val, list) or not val:
+            problems.append(f"{pre} value must be a non-empty list (Amazon 2025 schema)")
+            continue
+        first = val[0] if isinstance(val[0], dict) else {}
+        attrs = first.get("attributes")
         if not isinstance(attrs, dict) or not attrs:
-            problems.append(f"{pre} value.attributes must be a non-empty object")
+            problems.append(f"{pre} value[0].attributes must be a non-empty object")
+
         # quick sanity: some required attrs
-        for field in ("item_name","brand","item_type_keyword","product_description"):
-            if field not in attrs:
-                problems.append(f"{pre} missing attributes.{field}")
+        if isinstance(attrs, dict):
+            for field in ("item_name", "brand", "item_type_keyword", "product_description"):
+                if field not in attrs:
+                    problems.append(f"{pre} missing attributes.{field}")
     return problems
