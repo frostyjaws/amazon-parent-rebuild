@@ -3,7 +3,11 @@ import streamlit as st
 
 def get_amazon_access_token():
     """
-    Exchange LWA refresh token for an SP-API access token.
+    Exchanges your LWA refresh token for a short-lived SP-API access token.
+    Uses secrets:
+      - LWA_CLIENT_ID
+      - LWA_CLIENT_SECRET
+      - REFRESH_TOKEN
     """
     data = {
         "grant_type": "refresh_token",
