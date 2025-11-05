@@ -1,4 +1,4 @@
 streamlit
-python-amazon-sp-api
-pandas
 requests
+pandas
+Pillow
